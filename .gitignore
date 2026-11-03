@@ -1,0 +1,35 @@
+﻿.venv/
+.venv-*/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*.db
+*.sqlite
+*.sqlite3
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# SQLite temporary files
+*.db-wal
+*.db-shm
+
+# Development backups
+*.bak
+*.before_changes*
+*.prechange*
+api/*_before_*.py
+dashboard/*_before_*.py
+
+# Old benchmark and model backups
+data/benchmark_backup_*/
+data/training_backup_*/
+
+data/historical_exclusion_audit.csv
+
+# Superseded model artifacts
+models/saved/
