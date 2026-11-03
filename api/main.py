@@ -1,15 +1,18 @@
 ﻿
 import json
+import os
+import secrets
 import sqlite3
 from pathlib import Path
 from typing import Literal, Optional
 
-from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException, Query, Header
+from pydantic import BaseModel, Field
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATABASE_PATH = PROJECT_ROOT / "database" / "energy_data.db"
+
 
 app = FastAPI(
     title="Industrial Energy Intelligence API",
@@ -80,11 +83,29 @@ def fetch_one(query: str, parameters: tuple = ()):
 
 
 # --------------------------------------------------
-# ALERT STATUS REQUEST MODEL
+# REQUEST MODELS
 # --------------------------------------------------
 
 class AlertStatusUpdate(BaseModel):
     status: Literal["ACKNOWLEDGED", "RESOLVED"]
+
+
+class TelemetryIngest(BaseModel):
+    """Telemetry received from the local MQTT consumer."""
+
+    event_id: str = Field(min_length=1, max_length=200)
+    timestamp: str = Field(min_length=1, max_length=100)
+    machine_id: str = Field(min_length=1, max_length=100)
+    state: str = Field(min_length=1, max_length=50)
+
+    load_percent: float
+    rpm: float
+    temperature_c: float
+    power_kw: float
+    expected_power_kw: float
+    production_units_per_min: float
+    energy_kwh: float
+    degradation_factor: float
 
 
 # --------------------------------------------------
@@ -250,7 +271,128 @@ def get_machines():
 
 
 # --------------------------------------------------
-# TELEMETRY
+# TELEMETRY INGESTION - AUTHENTICATED CLOUD UPLOAD
+# --------------------------------------------------
+
+@app.post(
+    "/api/v1/telemetry/ingest",
+    tags=["Telemetry"],
+)
+def ingest_telemetry(
+    request: TelemetryIngest,
+    x_api_token: Optional[str] = Header(
+        default=None,
+        alias="X-API-Token",
+    ),
+):
+    """
+    Receive telemetry from the local MQTT consumer.
+
+    Authentication is performed using the TELEMETRY_API_TOKEN
+    environment variable configured on Render.
+    """
+
+    configured_token = os.getenv("TELEMETRY_API_TOKEN")
+
+    if not configured_token:
+        raise HTTPException(
+            status_code=503,
+            detail="Telemetry ingestion is not configured.",
+        )
+
+    if (
+        not x_api_token
+        or not secrets.compare_digest(
+            x_api_token,
+            configured_token,
+        )
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing API token.",
+        )
+
+    connection = get_write_connection()
+
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+
+        # Prevent the same event from being inserted twice.
+        existing = connection.execute(
+            """
+            SELECT id
+            FROM machine_telemetry
+            WHERE event_id = ?
+            LIMIT 1
+            """,
+            (request.event_id,),
+        ).fetchone()
+
+        if existing:
+            connection.commit()
+
+            return {
+                "status": "duplicate",
+                "message": "This telemetry event already exists.",
+                "event_id": request.event_id,
+            }
+
+        connection.execute(
+            """
+            INSERT INTO machine_telemetry (
+                event_id,
+                timestamp,
+                machine_id,
+                state,
+                load_percent,
+                rpm,
+                temperature_c,
+                power_kw,
+                expected_power_kw,
+                production_units_per_min,
+                energy_kwh,
+                degradation_factor
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                request.event_id,
+                request.timestamp,
+                request.machine_id,
+                request.state,
+                request.load_percent,
+                request.rpm,
+                request.temperature_c,
+                request.power_kw,
+                request.expected_power_kw,
+                request.production_units_per_min,
+                request.energy_kwh,
+                request.degradation_factor,
+            ),
+        )
+
+        connection.commit()
+
+        return {
+            "status": "inserted",
+            "message": "Telemetry successfully received.",
+            "event_id": request.event_id,
+        }
+
+    except sqlite3.Error:
+        connection.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail="Could not save telemetry to the database.",
+        )
+
+    finally:
+        connection.close()
+
+
+# --------------------------------------------------
+# TELEMETRY - RETRIEVAL
 # --------------------------------------------------
 
 @app.get("/api/v1/telemetry/latest", tags=["Telemetry"])
@@ -405,7 +547,6 @@ def update_alert_status(
     connection = get_write_connection()
 
     try:
-        # Acquire a write lock before checking the current status.
         connection.execute("BEGIN IMMEDIATE")
 
         alert = connection.execute(
