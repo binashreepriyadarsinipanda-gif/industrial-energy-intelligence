@@ -1,5 +1,5 @@
-﻿
-import json
+﻿import json
+import os
 from datetime import datetime
 
 import requests
@@ -13,7 +13,20 @@ from streamlit_autorefresh import st_autorefresh
 # CONFIGURATION
 # ============================================================
 
-API_BASE = "http://127.0.0.1:8000"
+# Read API URL from environment variable first,
+# then Streamlit Secrets, then use localhost for local testing.
+
+try:
+    STREAMLIT_API_BASE = st.secrets.get("API_BASE_URL", "")
+except Exception:
+    STREAMLIT_API_BASE = ""
+
+API_BASE = (
+    os.getenv("API_BASE_URL")
+    or STREAMLIT_API_BASE
+    or "http://127.0.0.1:8000"
+).strip().rstrip("/")
+
 
 st.set_page_config(
     page_title="Industrial Energy Intelligence",
@@ -137,7 +150,6 @@ def parse_explanation(value):
 def format_limitation_text(value):
     """
     Safely format diagnosis limitations.
-
     Handles strings, lists, tuples, None and other values.
     """
 
@@ -190,7 +202,7 @@ if st.sidebar.button(
 
 st.sidebar.caption("Automatic refresh: Every 5 seconds")
 st.sidebar.caption("Data source: FastAPI + SQLite")
-st.sidebar.caption("API: 127.0.0.1:8000")
+st.sidebar.caption(f"API: {API_BASE}")
 
 
 # ============================================================
