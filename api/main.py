@@ -108,6 +108,22 @@ class TelemetryIngest(BaseModel):
     degradation_factor: float
 
 
+class AlertIngest(BaseModel):
+    """An ML-generated energy-waste alert from the local consumer."""
+
+    event_id: str = Field(min_length=1, max_length=200)
+    machine_id: str = Field(min_length=1, max_length=100)
+    timestamp: str = Field(min_length=1, max_length=100)
+    actual_power_kw: float
+    expected_power_kw: float
+    excess_power_kw: float
+    excess_percentage: Optional[float] = None
+    threshold_kw: float
+    severity: Literal["WARNING", "HIGH", "CRITICAL"]
+    detection_method: str = Field(min_length=1, max_length=200)
+    explanation: str = Field(min_length=1, max_length=10000)
+
+
 # --------------------------------------------------
 # ALERT EXPLANATION PARSER
 # --------------------------------------------------
@@ -385,6 +401,139 @@ def ingest_telemetry(
         raise HTTPException(
             status_code=500,
             detail="Could not save telemetry to the database.",
+        )
+
+    finally:
+        connection.close()
+
+
+# --------------------------------------------------
+# ALERT INGESTION - AUTHENTICATED CLOUD UPLOAD
+# --------------------------------------------------
+
+@app.post("/api/v1/alerts/ingest", tags=["Alerts"])
+def ingest_alert(
+    request: AlertIngest,
+    x_api_token: Optional[str] = Header(
+        default=None,
+        alias="X-API-Token",
+    ),
+):
+    """Receive an ML-generated alert and link it to cloud telemetry."""
+
+    configured_token = os.getenv("TELEMETRY_API_TOKEN")
+
+    if not configured_token:
+        raise HTTPException(
+            status_code=503,
+            detail="Alert ingestion is not configured.",
+        )
+
+    if (
+        not x_api_token
+        or not secrets.compare_digest(x_api_token, configured_token)
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing API token.",
+        )
+
+    connection = get_write_connection()
+
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+
+        telemetry = connection.execute(
+            """
+            SELECT id, machine_id
+            FROM machine_telemetry
+            WHERE event_id = ?
+            LIMIT 1
+            """,
+            (request.event_id,),
+        ).fetchone()
+
+        if not telemetry:
+            raise HTTPException(
+                status_code=409,
+                detail="Matching cloud telemetry has not been received.",
+            )
+
+        if telemetry["machine_id"] != request.machine_id:
+            raise HTTPException(
+                status_code=409,
+                detail="Alert machine does not match cloud telemetry.",
+            )
+
+        existing = connection.execute(
+            """
+            SELECT alert_id
+            FROM energy_alerts
+            WHERE telemetry_id = ?
+            LIMIT 1
+            """,
+            (telemetry["id"],),
+        ).fetchone()
+
+        if existing:
+            connection.commit()
+            return {
+                "status": "duplicate",
+                "event_id": request.event_id,
+                "alert_id": existing["alert_id"],
+            }
+
+        cursor = connection.execute(
+            """
+            INSERT INTO energy_alerts (
+                telemetry_id,
+                event_id,
+                machine_id,
+                timestamp,
+                actual_power_kw,
+                expected_power_kw,
+                excess_power_kw,
+                excess_percentage,
+                threshold_kw,
+                severity,
+                detection_method,
+                explanation
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                telemetry["id"],
+                request.event_id,
+                request.machine_id,
+                request.timestamp,
+                request.actual_power_kw,
+                request.expected_power_kw,
+                request.excess_power_kw,
+                request.excess_percentage,
+                request.threshold_kw,
+                request.severity,
+                request.detection_method,
+                request.explanation,
+            ),
+        )
+
+        connection.commit()
+
+        return {
+            "status": "inserted",
+            "event_id": request.event_id,
+            "alert_id": cursor.lastrowid,
+        }
+
+    except HTTPException:
+        connection.rollback()
+        raise
+
+    except sqlite3.Error:
+        connection.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Could not save alert to the database.",
         )
 
     finally:
