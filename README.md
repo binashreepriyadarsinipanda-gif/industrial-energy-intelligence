@@ -1,4 +1,4 @@
-﻿# Industrial Energy Intelligence
+# Industrial Energy Intelligence
 
 **Machine Learning-Based Industrial Energy Waste Detection and Process Energy Optimization**
 
@@ -63,9 +63,19 @@ These results require external validation on real industrial telemetry.
 
 Run python -m pytest -q. The latest recorded development test run passed 58 tests.
 
-## Deployment Considerations
+## Live Deployment
 
-The current development configuration uses local SQLite storage, a local API address, and a local MQTT broker. Cloud deployment requires configurable service addresses, persistent database storage, and a reachable MQTT broker.
+The project has a deployed cloud API and monitoring dashboard.
+
+- **Streamlit Dashboard:** https://industrial-energy-intelligence-3hlamt6xjnxgkddjprfyiw.streamlit.app/
+- **FastAPI Backend:** https://industrial-energy-intelligence.onrender.com
+- **API Documentation:** https://industrial-energy-intelligence.onrender.com/docs
+
+The Streamlit dashboard communicates with the deployed FastAPI backend. The MQTT broker, simulator, and consumer can run locally. The consumer forwards telemetry readings and generated alerts to the cloud API using authenticated requests.
+
+Configure the `TELEMETRY_API_TOKEN` environment variable securely for the consumer and the deployed API. Never commit actual tokens or credentials.
+
+The cloud deployment is intended as a demonstration environment. Database persistence and availability depend on the hosting configuration.
 
 ## License
 

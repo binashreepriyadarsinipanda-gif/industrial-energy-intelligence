@@ -4,6 +4,7 @@ import json
 import math
 import random
 import time
+import threading
 from datetime import datetime
 
 import paho.mqtt.client as mqtt
@@ -22,7 +23,6 @@ MACHINE_ID = "MOTOR-01"
 PUBLISH_INTERVAL_SECONDS = 2
 
 # Controlled anomaly-test settings.
-# This adds 12% excess power during eligible operating states.
 TEST_DEGRADATION_FACTOR = 1.12
 
 
@@ -41,9 +41,7 @@ def generate_machine_data(anomaly_test=False):
     cycle += 1
     phase = cycle % 120
 
-    # --------------------------------------------------------
     # MACHINE OPERATING STATES
-    # --------------------------------------------------------
 
     if phase < 10:
         state = "STARTUP"
@@ -77,10 +75,7 @@ def generate_machine_data(anomaly_test=False):
 
     load = max(0.0, min(load, 100.0))
 
-    # --------------------------------------------------------
     # NORMAL TEMPERATURE
-    # Matches benchmark generation logic.
-    # --------------------------------------------------------
 
     temperature = (
         30
@@ -88,10 +83,7 @@ def generate_machine_data(anomaly_test=False):
         + random.gauss(0, 1.5)
     )
 
-    # --------------------------------------------------------
     # EXPECTED POWER
-    # Matches the benchmark baseline formula.
-    # --------------------------------------------------------
 
     expected_power = (
         8
@@ -100,9 +92,7 @@ def generate_machine_data(anomaly_test=False):
         + temperature * 0.04
     )
 
-    # --------------------------------------------------------
     # HEALTHY OPERATION / CONTROLLED ANOMALY
-    # --------------------------------------------------------
 
     degradation = 1.0
 
@@ -114,9 +104,7 @@ def generate_machine_data(anomaly_test=False):
         + random.gauss(0, 0.8)
     )
 
-    # --------------------------------------------------------
     # PRODUCTION
-    # --------------------------------------------------------
 
     if state in ("RUNNING", "HIGH_LOAD"):
         production = max(
@@ -126,7 +114,8 @@ def generate_machine_data(anomaly_test=False):
     else:
         production = 0.0
 
-    # Energy consumed during one publishing interval.
+    # ENERGY CONSUMED DURING ONE PUBLISHING INTERVAL
+
     energy_kwh = power * (
         PUBLISH_INTERVAL_SECONDS / 3600
     )
@@ -145,6 +134,33 @@ def generate_machine_data(anomaly_test=False):
         "energy_kwh": round(energy_kwh, 5),
         "degradation_factor": round(degradation, 5),
     }
+
+
+# ============================================================
+# MQTT CONNECTION CALLBACKS
+# ============================================================
+
+connection_event = threading.Event()
+connection_failed = threading.Event()
+
+
+def on_connect(client, userdata, flags, reason_code, properties):
+    """Confirm successful connection to MQTT broker."""
+
+    if reason_code == 0:
+        print("Connected to MQTT broker successfully.")
+        connection_event.set()
+        connection_failed.clear()
+    else:
+        print("MQTT connection failed:", reason_code)
+        connection_failed.set()
+
+
+def on_disconnect(client, userdata, disconnect_flags, reason_code, properties):
+    """Report unexpected broker disconnections."""
+
+    if reason_code != 0:
+        print("MQTT broker disconnected. Reason:", reason_code)
 
 
 # ============================================================
@@ -171,13 +187,17 @@ def main():
         client_id="industrial_energy_simulator",
     )
 
-    connected = False
+    client.on_connect = on_connect
+    client.on_disconnect = on_disconnect
+
+    loop_started = False
 
     try:
         print("=" * 45)
         print("Industrial Energy Intelligence Platform")
         print("Live MQTT Machine Simulator")
         print("=" * 45)
+
         print(f"Machine: {MACHINE_ID}")
         print(f"Broker: {BROKER}:{PORT}")
         print(f"Topic: {TOPIC}")
@@ -191,11 +211,38 @@ def main():
 
         print("Press CTRL+C to stop.\n")
 
-        client.connect(BROKER, PORT, keepalive=60)
+        # Connect to broker.
+
+        client.connect(
+            BROKER,
+            PORT,
+            keepalive=60
+        )
+
         client.loop_start()
-        connected = True
+        loop_started = True
+
+        # WAIT FOR BROKER CONNECTION CONFIRMATION.
+
+        if not connection_event.wait(timeout=15):
+            raise RuntimeError(
+                "MQTT broker connection timed out."
+            )
+
+        print("Starting live telemetry publishing...\n")
+
+        # CONTINUOUS TELEMETRY PUBLISHING.
 
         while True:
+
+            if not client.is_connected():
+                print("Waiting for MQTT broker reconnection...")
+
+                if not connection_event.wait(timeout=15):
+                    raise RuntimeError(
+                        "MQTT reconnection timed out."
+                    )
+
             machine_data = generate_machine_data(
                 anomaly_test=args.anomaly_test
             )
@@ -208,20 +255,22 @@ def main():
                 qos=1,
             )
 
+            if info.rc != mqtt.MQTT_ERR_SUCCESS:
+                print(
+                    "Publish failed; result code:",
+                    info.rc
+                )
+                time.sleep(1)
+                continue
+
             info.wait_for_publish(timeout=5)
 
             if not info.is_published():
                 print(
                     "Publish timed out; event:",
-                    machine_data["event_id"],
+                    machine_data["event_id"]
                 )
-                continue
-
-            if info.rc != mqtt.MQTT_ERR_SUCCESS:
-                print(
-                    "Publish failed; result code:",
-                    info.rc,
-                )
+                time.sleep(1)
                 continue
 
             print(
@@ -246,7 +295,7 @@ def main():
         print("MQTT simulator error:", error)
 
     finally:
-        if connected:
+        if loop_started:
             client.disconnect()
             client.loop_stop()
 

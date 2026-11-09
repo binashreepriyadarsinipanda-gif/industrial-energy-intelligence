@@ -1,7 +1,10 @@
 
 import json
+import os
 import sqlite3
 from pathlib import Path
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 
 import paho.mqtt.client as mqtt
 
@@ -24,6 +27,13 @@ DATABASE_PATH = (
     / "database"
     / "energy_data.db"
 )
+
+# Render cloud API configuration
+API_BASE_URL = "https://industrial-energy-intelligence.onrender.com"
+CLOUD_INGEST_URL = f"{API_BASE_URL}/api/v1/telemetry/ingest"
+CLOUD_ALERT_INGEST_URL = f"{API_BASE_URL}/api/v1/alerts/ingest"
+
+TELEMETRY_API_TOKEN = os.getenv("TELEMETRY_API_TOKEN")
 
 
 # ============================================================
@@ -94,6 +104,129 @@ def save_telemetry(data):
 
 
 # ============================================================
+# CLOUD FUNCTION: FORWARD TELEMETRY TO RENDER
+# ============================================================
+
+def forward_telemetry(data):
+    """
+    Forward locally saved telemetry to Render.
+
+    Cloud failures do not stop local processing.
+    """
+
+    if not TELEMETRY_API_TOKEN:
+        print(
+            "Cloud forwarding skipped: "
+            "TELEMETRY_API_TOKEN is missing."
+        )
+        return False
+
+    try:
+        payload = json.dumps(
+            data,
+            allow_nan=False,
+        ).encode("utf-8")
+
+        request = Request(
+            CLOUD_INGEST_URL,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "X-API-Token": TELEMETRY_API_TOKEN,
+            },
+            method="POST",
+        )
+
+        with urlopen(request, timeout=20) as response:
+
+            result = json.loads(
+                response.read().decode("utf-8")
+            )
+
+            print(
+                "Cloud forwarding:",
+                result.get("status", "success"),
+                "| event_id =",
+                data["event_id"],
+            )
+
+            return True
+
+    except HTTPError as error:
+        print(
+            "Cloud API rejected telemetry:",
+            error.code,
+            error.read().decode(
+                "utf-8",
+                errors="replace",
+            ),
+        )
+
+    except (URLError, TimeoutError, OSError) as error:
+        print("Cloud forwarding failed:", error)
+
+    except Exception as error:
+        print("Unexpected cloud forwarding error:", error)
+
+    return False
+
+
+# ============================================================
+
+
+def forward_alert(alert):
+    """Send a locally detected ML alert to the cloud API."""
+    if not TELEMETRY_API_TOKEN:
+        print("CLOUD ALERT FORWARDING SKIPPED: TELEMETRY_API_TOKEN is not set.")
+        return False
+
+    payload_data = {
+        "event_id": alert["event_id"],
+        "machine_id": alert["machine_id"],
+        "timestamp": alert["timestamp"],
+        "actual_power_kw": alert["actual_power_kw"],
+        "expected_power_kw": alert["expected_power_kw"],
+        "excess_power_kw": alert["excess_power_kw"],
+        "excess_percentage": alert.get("excess_percentage"),
+        "threshold_kw": alert["residual_threshold_kw"],
+        "severity": alert["severity"],
+        "detection_method": alert["detection_method"],
+        "explanation": alert["explanation"],
+    }
+
+    try:
+        request = Request(
+            CLOUD_ALERT_INGEST_URL,
+            data=json.dumps(payload_data).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "X-API-Token": TELEMETRY_API_TOKEN,
+            },
+            method="POST",
+        )
+
+        with urlopen(request, timeout=20) as response:
+            result = json.loads(response.read().decode("utf-8"))
+            print(
+                "CLOUD ALERT FORWARDING:",
+                result.get("status", "response received"),
+                "| event_id =", alert["event_id"],
+            )
+            return True
+
+    except HTTPError as exc:
+        print(
+            "CLOUD ALERT FORWARDING HTTP ERROR:",
+            exc.code,
+            exc.read().decode("utf-8", errors="replace"),
+        )
+    except (URLError, TimeoutError, OSError) as exc:
+        print("CLOUD ALERT FORWARDING CONNECTION ERROR:", exc)
+    except Exception as exc:
+        print("CLOUD ALERT FORWARDING ERROR:", exc)
+
+    return False
+
 # DATABASE FUNCTION: RETRIEVE TELEMETRY ID
 # ============================================================
 
@@ -176,7 +309,7 @@ def on_connect(client, userdata, flags, reason_code, properties):
 
 
 def on_message(client, userdata, msg):
-    """Validate, store, detect and diagnose energy anomalies."""
+    """Validate, store, detect, diagnose and forward telemetry."""
 
     # --------------------------------------------------------
     # STEP 1: DECODE MESSAGE
@@ -202,7 +335,7 @@ def on_message(client, userdata, msg):
             return
 
         # ----------------------------------------------------
-        # STEP 3: SAVE TELEMETRY
+        # STEP 3: SAVE TELEMETRY LOCALLY
         # ----------------------------------------------------
 
         inserted = save_telemetry(data)
@@ -222,13 +355,19 @@ def on_message(client, userdata, msg):
         )
 
         # ----------------------------------------------------
-        # STEP 4: RETRIEVE TELEMETRY DATABASE ID
+        # STEP 4: FORWARD TELEMETRY TO RENDER
+        # ----------------------------------------------------
+
+        forward_telemetry(data)
+
+        # ----------------------------------------------------
+        # STEP 5: RETRIEVE TELEMETRY DATABASE ID
         # ----------------------------------------------------
 
         telemetry_id = get_telemetry_id(data["event_id"])
 
         # ----------------------------------------------------
-        # STEP 5: RUN ML ENERGY-WASTE DETECTOR
+        # STEP 6: RUN ML ENERGY-WASTE DETECTOR
         # ----------------------------------------------------
 
         detection_result = detect_energy_waste(data)
@@ -246,7 +385,7 @@ def on_message(client, userdata, msg):
         )
 
         # ----------------------------------------------------
-        # STEP 6: DIAGNOSE AND SAVE ANOMALY
+        # STEP 7: DIAGNOSE AND SAVE ANOMALY
         # ----------------------------------------------------
 
         if detection_result["is_anomaly"]:
@@ -267,7 +406,6 @@ def on_message(client, userdata, msg):
             )
 
             # Preserve the original detector result.
-            # Only its explanation field is replaced in a copy.
             alert_result = detection_result.copy()
 
             alert_result["explanation"] = build_alert_explanation(
@@ -282,6 +420,7 @@ def on_message(client, userdata, msg):
             )
 
             if alert_saved:
+                forward_alert(alert_result)
                 print(
                     "ENERGY WASTE ALERT CREATED:",
                     "| machine =", data["machine_id"],
@@ -335,6 +474,12 @@ def main():
         print("Port:", PORT)
         print("Topic:", TOPIC)
         print("Database:", DATABASE_PATH)
+        print("Cloud API:", CLOUD_INGEST_URL)
+
+        if TELEMETRY_API_TOKEN:
+            print("Cloud authentication token: configured")
+        else:
+            print("WARNING: Cloud authentication token is missing.")
 
         initialize_alert_table(DATABASE_PATH)
 

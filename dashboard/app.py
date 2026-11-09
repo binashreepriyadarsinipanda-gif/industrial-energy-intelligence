@@ -1,4 +1,4 @@
-ï»¿import json
+import json
 import os
 from datetime import datetime
 
@@ -13,8 +13,10 @@ from streamlit_autorefresh import st_autorefresh
 # CONFIGURATION
 # ============================================================
 
-# Read API URL from environment variable first,
-# then Streamlit Secrets, then use localhost for local testing.
+# API URL priority:
+# 1. Environment variable
+# 2. Streamlit Cloud Secrets
+# 3. Localhost for local development
 
 try:
     STREAMLIT_API_BASE = st.secrets.get("API_BASE_URL", "")
@@ -30,12 +32,12 @@ API_BASE = (
 
 st.set_page_config(
     page_title="Industrial Energy Intelligence",
-    page_icon="âš¡",
+    page_icon="?",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Automatically rerun the dashboard every 5 seconds.
+# Refresh every 30 seconds to reduce unnecessary API requests.
 st_autorefresh(
     interval=5000,
     key="dashboard_autorefresh"
@@ -85,13 +87,13 @@ st.markdown("""
 
 def get_data(endpoint, params=None):
     """
-    Retrieve fresh data from the FastAPI backend.
+    Retrieve data from the FastAPI backend.
     """
 
     response = requests.get(
         f"{API_BASE}{endpoint}",
         params=params,
-        timeout=10
+        timeout=30
     )
 
     response.raise_for_status()
@@ -107,7 +109,7 @@ def update_alert_status(alert_id, new_status):
     response = requests.patch(
         f"{API_BASE}/api/v1/alerts/{alert_id}/status",
         json={"status": new_status},
-        timeout=10
+        timeout=30
     )
 
     response.raise_for_status()
@@ -118,8 +120,8 @@ def update_alert_status(alert_id, new_status):
 def show_api_error(error):
     st.error(
         "Could not retrieve data from the API. "
-        "Make sure the FastAPI server is running at "
-        f"{API_BASE}. Details: {error}"
+        "Check the backend connection. "
+        f"API URL: {API_BASE}. Details: {error}"
     )
 
 
@@ -173,7 +175,7 @@ def format_limitation_text(value):
 # SIDEBAR NAVIGATION
 # ============================================================
 
-st.sidebar.title("âš¡ Energy Intelligence")
+st.sidebar.title("? Energy Intelligence")
 
 st.sidebar.caption(
     "Industrial monitoring and analytics"
@@ -252,7 +254,7 @@ st.markdown(
 )
 
 st.markdown(
-    f'<p class="sub-title">{plant_name} Â· {plant_location}</p>',
+    f'<p class="sub-title">{plant_name} · {plant_location}</p>',
     unsafe_allow_html=True
 )
 
@@ -543,7 +545,7 @@ elif page == "Machine Monitoring":
 
             x3.metric(
                 "Temperature",
-                f"{latest_row['temperature_c']:.1f} Â°C"
+                f"{latest_row['temperature_c']:.1f} °C"
             )
 
             x4.metric(
@@ -784,9 +786,9 @@ elif page == "Energy Alerts":
             )
 
             title = (
-                f"Alert #{alert_id} Â· "
-                f"{alert['machine_id']} Â· "
-                f"{alert['severity']} Â· "
+                f"Alert #{alert_id} · "
+                f"{alert['machine_id']} · "
+                f"{alert['severity']} · "
                 f"{alert_status}"
             )
 
@@ -1223,7 +1225,7 @@ elif page == "Analytics":
 st.divider()
 
 st.caption(
-    "Industrial Energy Intelligence Â· Project monitoring interface. "
+    "Industrial Energy Intelligence · Project monitoring interface. "
     "Model evaluation uses controlled synthetic benchmark data; "
     "dashboard readings are retrieved from the project's SQLite database."
 )
