@@ -254,7 +254,7 @@ st.markdown(
 )
 
 st.markdown(
-    f'<p class="sub-title">{plant_name} · {plant_location}</p>',
+    f'<p class="sub-title">{plant_name} Â· {plant_location}</p>',
     unsafe_allow_html=True
 )
 
@@ -545,7 +545,7 @@ elif page == "Machine Monitoring":
 
             x3.metric(
                 "Temperature",
-                f"{latest_row['temperature_c']:.1f} °C"
+                f"{latest_row['temperature_c']:.1f} Â°C"
             )
 
             x4.metric(
@@ -786,9 +786,9 @@ elif page == "Energy Alerts":
             )
 
             title = (
-                f"Alert #{alert_id} · "
-                f"{alert['machine_id']} · "
-                f"{alert['severity']} · "
+                f"Alert #{alert_id} Â· "
+                f"{alert['machine_id']} Â· "
+                f"{alert['severity']} Â· "
                 f"{alert_status}"
             )
 
@@ -1225,7 +1225,7 @@ elif page == "Analytics":
 st.divider()
 
 st.caption(
-    "Industrial Energy Intelligence · Project monitoring interface. "
+    "Industrial Energy Intelligence Â· Project monitoring interface. "
     "Model evaluation uses controlled synthetic benchmark data; "
     "dashboard readings are retrieved from the project's SQLite database."
 )
