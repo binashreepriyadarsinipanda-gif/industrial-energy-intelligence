@@ -1,4 +1,3 @@
-﻿
 import json
 import os
 import secrets
@@ -8,10 +7,20 @@ from typing import Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Header
 from pydantic import BaseModel, Field
+from contextlib import asynccontextmanager
+
+from database.init_db import create_database
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATABASE_PATH = PROJECT_ROOT / "database" / "energy_data.db"
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize the database when the API starts."""
+    create_database()
+    yield
 
 
 app = FastAPI(
@@ -21,6 +30,7 @@ app = FastAPI(
         "energy-waste detection, alert management and analytics."
     ),
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 
