@@ -2,6 +2,7 @@ import json
 import os
 import secrets
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -10,6 +11,7 @@ from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
 
 from database.init_db import create_database
+from detection.energy_detector import detect_energy_waste
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -204,6 +206,153 @@ def health_check():
 # OVERVIEW
 # --------------------------------------------------
 
+@app.post("/api/v1/demo/tick", tags=["Demo Simulation"])
+def generate_demo_reading():
+    """
+    Generate one clearly identified synthetic machine reading.
+
+    This endpoint is intended for the free cloud demonstration: the
+    dashboard calls it before refreshing its metrics. It is deliberately
+    rate-limited to avoid generating a row for every visitor/request.
+    These readings are simulated and are not real factory measurements.
+    Set ENABLE_CLOUD_DEMO_GENERATOR=false to disable it.
+    """
+    if os.getenv("ENABLE_CLOUD_DEMO_GENERATOR", "true").strip().lower() in {
+        "0", "false", "no", "off"
+    }:
+        return {"status": "disabled", "message": "Cloud demo generation is disabled."}
+
+    connection = get_write_connection()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+
+        latest = connection.execute(
+            """
+            SELECT timestamp
+            FROM machine_telemetry
+            WHERE event_id LIKE 'CLOUD-DEMO-%'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+
+        now = datetime.now(timezone.utc)
+        if latest:
+            try:
+                latest_time = datetime.fromisoformat(
+                    latest["timestamp"].replace("Z", "+00:00")
+                )
+                if latest_time.tzinfo is None:
+                    latest_time = latest_time.replace(tzinfo=timezone.utc)
+                if (now - latest_time).total_seconds() < 4.5:
+                    connection.commit()
+                    return {
+                        "status": "rate_limited",
+                        "message": "A recent cloud demo reading already exists.",
+                        "latest_reading": latest["timestamp"],
+                    }
+            except (TypeError, ValueError):
+                pass
+
+        demo_count = connection.execute(
+            "SELECT COUNT(*) FROM machine_telemetry WHERE event_id LIKE 'CLOUD-DEMO-%'"
+        ).fetchone()[0]
+
+        # Vary operating conditions slightly while staying within valid ranges.
+        phase = demo_count % 12
+        load_percent = round(62.0 + (phase % 5) * 3.5, 2)
+        rpm = round(1440.0 + (phase % 4) * 11.0, 2)
+        temperature_c = round(52.0 + (phase % 6) * 1.7, 2)
+        production = round(70.0 + (phase % 5) * 4.0, 2)
+        state = "HIGH_LOAD" if load_percent >= 75 else "RUNNING"
+
+        telemetry = {
+            "event_id": f"CLOUD-DEMO-{secrets.token_hex(8)}",
+            "machine_id": "MOTOR-01",
+            "timestamp": now.isoformat(timespec="seconds"),
+            "state": state,
+            "load_percent": load_percent,
+            "rpm": rpm,
+            "temperature_c": temperature_c,
+            "power_kw": 50.0,
+            "production_units_per_min": production,
+            "degradation_factor": 1.0,
+        }
+
+        # First prediction obtains the model's expected power. The second
+        # detector call evaluates a controlled excess against that baseline.
+        baseline_result = detect_energy_waste(telemetry)
+        expected_power = float(baseline_result["expected_power_kw"])
+        threshold = float(baseline_result["residual_threshold_kw"])
+        excess_multipliers = (0.45, 1.25, 0.70, 2.25, 0.35, 3.25, 0.80, 1.45, 0.50, 2.60, 0.65, 1.10)
+        excess = threshold * excess_multipliers[phase]
+        telemetry["power_kw"] = round(expected_power + excess, 4)
+        detection = detect_energy_waste(telemetry)
+
+        connection.execute(
+            """
+            INSERT INTO machine_telemetry (
+                event_id, timestamp, machine_id, state, load_percent, rpm,
+                temperature_c, power_kw, expected_power_kw,
+                production_units_per_min, energy_kwh, degradation_factor
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                telemetry["event_id"], telemetry["timestamp"],
+                telemetry["machine_id"], telemetry["state"],
+                telemetry["load_percent"], telemetry["rpm"],
+                telemetry["temperature_c"], telemetry["power_kw"],
+                detection["expected_power_kw"],
+                telemetry["production_units_per_min"],
+                round(telemetry["power_kw"] / 4.0, 4),
+                telemetry["degradation_factor"],
+            ),
+        )
+        telemetry_id = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        alert_id = None
+        if detection["is_anomaly"]:
+            cursor = connection.execute(
+                """
+                INSERT INTO energy_alerts (
+                    telemetry_id, event_id, machine_id, timestamp,
+                    actual_power_kw, expected_power_kw, excess_power_kw,
+                    excess_percentage, threshold_kw, severity,
+                    detection_method, explanation
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    telemetry_id, detection["event_id"], detection["machine_id"],
+                    detection["timestamp"], detection["actual_power_kw"],
+                    detection["expected_power_kw"], detection["excess_power_kw"],
+                    detection["excess_percentage"], detection["residual_threshold_kw"],
+                    detection["severity"], detection["detection_method"],
+                    detection["explanation"],
+                ),
+            )
+            alert_id = cursor.lastrowid
+
+        connection.commit()
+        return {
+            "status": "generated",
+            "data_type": "SYNTHETIC_DEMO_DATA",
+            "event_id": telemetry["event_id"],
+            "machine_id": telemetry["machine_id"],
+            "timestamp": telemetry["timestamp"],
+            "power_kw": telemetry["power_kw"],
+            "expected_power_kw": detection["expected_power_kw"],
+            "anomaly_detected": detection["is_anomaly"],
+            "severity": detection["severity"],
+            "alert_id": alert_id,
+        }
+
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
 @app.get("/api/v1/overview", tags=["Analytics"])
 def get_overview():
     telemetry = fetch_one(
@@ -223,13 +372,13 @@ def get_overview():
         """
         SELECT
             COUNT(*) AS total_alerts,
-            SUM(CASE WHEN status = 'OPEN' THEN 1 ELSE 0 END)
+            COALESCE(SUM(CASE WHEN status = 'OPEN' THEN 1 ELSE 0 END), 0)
                 AS open_alerts,
-            SUM(CASE WHEN severity = 'CRITICAL' THEN 1 ELSE 0 END)
+            COALESCE(SUM(CASE WHEN severity = 'CRITICAL' THEN 1 ELSE 0 END), 0)
                 AS critical_alerts,
-            SUM(CASE WHEN severity = 'HIGH' THEN 1 ELSE 0 END)
+            COALESCE(SUM(CASE WHEN severity = 'HIGH' THEN 1 ELSE 0 END), 0)
                 AS high_alerts,
-            SUM(CASE WHEN severity = 'WARNING' THEN 1 ELSE 0 END)
+            COALESCE(SUM(CASE WHEN severity = 'WARNING' THEN 1 ELSE 0 END), 0)
                 AS warning_alerts
         FROM energy_alerts
         """

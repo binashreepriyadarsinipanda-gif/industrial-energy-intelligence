@@ -73,9 +73,15 @@ The project has a deployed cloud API and monitoring dashboard.
 
 The Streamlit dashboard communicates with the deployed FastAPI backend. The MQTT broker, simulator, and consumer can run locally. The consumer forwards telemetry readings and generated alerts to the cloud API using authenticated requests.
 
+### Laptop-independent cloud demo mode
+
+The dashboard calls `POST /api/v1/demo/tick` before loading its metrics. The API creates a rate-limited synthetic reading, evaluates it with the existing condition-aware regression detector, and stores any resulting alert. This lets the dashboard demonstrate changing readings without a local MQTT broker, simulator, consumer, or laptop being online. The dashboard refreshes every five seconds. Generated readings are synthetic demonstration data, not measurements from physical factory equipment.
+
+Set `ENABLE_CLOUD_DEMO_GENERATOR=false` in the API environment to disable this endpoint's generation. The endpoint is enabled by default for the demonstration deployment.
+
 Configure the `TELEMETRY_API_TOKEN` environment variable securely for the consumer and the deployed API. Never commit actual tokens or credentials.
 
-The cloud deployment is intended as a demonstration environment. Database persistence and availability depend on the hosting configuration.
+**Free-hosting limitations:** the Render free web service can sleep when idle, so the first request may take time to wake it. The SQLite database on the service filesystem is not durable across service replacement, redeployment, or restart. Use a persistent disk or managed database if long-term history is required.
 
 ## License
 
